@@ -91,5 +91,5 @@ def triggerable_deposit() -> (uint256, uint256, uint256):
         if _deposit.starting_time + _deposit.interval <= block.timestamp:
             _amount: uint256 = _deposit.input_amount / _deposit.number_trades
             _out_amount: DynArray[uint256, 7] = PancakeswapRouter(PANCAKESWAP_ROUTER).getAmountsOut(_amount, _deposit.path)
-            return i, _out_amount[0] * 99 / 100, _deposit.number_trades
+            return i, _out_amount[len(_out_amount) - 1], _deposit.number_trades
     return 0, 0, 0
