@@ -1,0 +1,15 @@
+name: DCA trading bot
+foundry:
+  fork:
+    ethereum:
+      mainnet:
+        upstream_provider: infura
+hardhat:
+  fork:
+    ethereum:
+      mainnet:
+        upstream_provider: infura
+ethereum:
+  default_network: mainnet-fork
+  mainnet_fork:
+    default_provider: foundry
