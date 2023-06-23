@@ -2,10 +2,11 @@
 
 struct Deposit:
     depositor: address
-    path: DynArray[address, 8]
+    path: DynArray[address, MAX_SIZE]
     input_amount: uint256
     number_trades: uint256
     interval: uint256
+    remaining_counts: uint256
     starting_time: uint256
 
 interface WrappedEth:
@@ -32,12 +33,21 @@ refund_wallet: public(address)
 fee: public(uint256)
 paloma: public(bytes32)
 
+event Deposited:
+    swap_id: uint256
+    token0: address
+    token1: address
+    input_amount: uint256
+    number_trades: uint256
+    interval: uint256
+    starting_time: uint256
+    depositor: address
+
 event Swapped:
     swap_id: uint256
-    path: DynArray[address, MAX_SIZE]
-    depositor: address
-    _amount: uint256
-    _out_amount: uint256
+    remaining_counts: uint256
+    amount: uint256
+    out_amount: uint256
 
 event UpdateCompass:
     old_compass: address
@@ -99,14 +109,19 @@ def deposit(path: DynArray[address, 8], input_amount: uint256, number_trades: ui
         self._safe_transfer_from(path[0], msg.sender, self, input_amount)
         _amount0 = ERC20(path[0]).balanceOf(self) - _amount0
     _next_deposit: uint256 = self.next_deposit
+    _starting_time: uint256 = starting_time
+    if starting_time <= block.timestamp:
+        _starting_time = block.timestamp
     self.deposit_list[_next_deposit] = Deposit({
         depositor: msg.sender,
         path: path,
         input_amount: _amount0,
         number_trades: number_trades,
         interval: interval,
-        starting_time: starting_time
+        remaining_counts: number_trades,
+        starting_time: _starting_time
     })
+    log Deposited(_next_deposit, path[0], path[last_index], input_amount, number_trades, interval, _starting_time, msg.sender)
     _next_deposit += 1
     self.next_deposit = _next_deposit
 
@@ -122,21 +137,18 @@ def _safe_approve(_token: address, _to: address, _value: uint256):
 
 @external
 @nonreentrant('lock')
-def swap(swap_id: uint256, amount_out_min: uint256):
-    _next_deposit: uint256 = self.next_deposit
-    assert swap_id < _next_deposit
+def swap(swap_id: uint256, amount_out_min: uint256) -> uint256:
     _deposit: Deposit = self.deposit_list[swap_id]
     if msg.sender == self.compass_evm:
         assert len(msg.data) == 100, "invalid payload"
         assert self.paloma == convert(slice(msg.data, 68, 32), bytes32), "invalid paloma"
     else:
-        assert _deposit.depositor == msg.sender, "unauthorized"
-    assert _deposit.number_trades > 0, "all traded"
-    assert _deposit.starting_time + _deposit.interval <= block.timestamp
-    _amount: uint256 = _deposit.input_amount / _deposit.number_trades
+        assert _deposit.depositor == msg.sender or msg.sender == empty(address), "unauthorized"
+    assert _deposit.remaining_counts > 0, "all traded"
+    assert _deposit.starting_time + _deposit.interval * (_deposit.number_trades - _deposit.remaining_counts) <= block.timestamp, "too early"
+    _amount: uint256 = _deposit.input_amount / _deposit.remaining_counts
     _deposit.input_amount -= _amount
-    _deposit.number_trades -= 1
-    _deposit.starting_time = block.timestamp
+    _deposit.remaining_counts -= 1
     _path: DynArray[address, MAX_SIZE] = _deposit.path
     if _path[0] == VETH:
         _path[0] = WETH
@@ -152,28 +164,8 @@ def swap(swap_id: uint256, amount_out_min: uint256):
         _out_amount = ERC20(_path[last_index]).balanceOf(_deposit.depositor)
         UniswapV2Router(ROUTER).swapExactTokensForTokensSupportingFeeOnTransferTokens(_amount, amount_out_min, _deposit.path, _deposit.depositor, block.timestamp)
         _out_amount = ERC20(_path[last_index]).balanceOf(_deposit.depositor) - _out_amount
-    if _deposit.number_trades == 0:
-        if swap_id < _next_deposit - 1:
-            self.deposit_list[swap_id] = self.deposit_list[_next_deposit - 1]
-        self.next_deposit = _next_deposit - 1
-    else:
-        self.deposit_list[swap_id] = _deposit
-    log Swapped(swap_id, _deposit.path, _deposit.depositor, _amount, _out_amount)
-
-@view
-@external
-def triggerable_deposit() -> (uint256, uint256, uint256):
-    assert msg.sender == empty(address)
-    _size: uint256 = self.next_deposit
-    for i in range(1000000):
-        if i == _size:
-            return 0, 0, 0
-        _deposit: Deposit = self.deposit_list[i]
-        if _deposit.starting_time + _deposit.interval <= block.timestamp:
-            _amount: uint256 = _deposit.input_amount / _deposit.number_trades
-            _out_amount: DynArray[uint256, 7] = UniswapV2Router(ROUTER).getAmountsOut(_amount, _deposit.path)
-            return i, _out_amount[len(_out_amount) - 1], _deposit.number_trades
-    return 0, 0, 0
+    log Swapped(swap_id, _deposit.remaining_counts, _amount, _out_amount)
+    return _out_amount
 
 @external
 def update_compass(new_compass: address):
