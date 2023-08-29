@@ -88,6 +88,7 @@ def __init__(_compass_evm: address, router: address, _refund_wallet: address, _f
     self.refund_wallet = _refund_wallet
     self.fee = _fee
     self.service_fee_collector = _service_fee_collector
+    assert _service_fee < DENOMINATOR
     self.service_fee = _service_fee
     log UpdateCompass(empty(address), _compass_evm)
     log UpdateRefundWallet(empty(address), _refund_wallet)
@@ -116,13 +117,13 @@ def deposit(path: DynArray[address, MAX_SIZE], amount: uint256, number_trades: u
     send(self.refund_wallet, _fee)
     _value = unsafe_sub(_value, _fee)
     last_index: uint256 = unsafe_sub(len(path), 1)
-    token1: address = path[last_index]
     if path[0] == VETH:
         assert _value >= amount, "Insufficient deposit"
         if _value > amount:
             send(msg.sender, unsafe_sub(_value, amount))
     else:
-        send(msg.sender, _value)
+        if _value > 0:
+            send(msg.sender, _value)
         self._safe_transfer_from(path[0], msg.sender, self, amount)
     _next_deposit: uint256 = self.next_deposit
     _starting_time: uint256 = starting_time
@@ -139,7 +140,7 @@ def deposit(path: DynArray[address, MAX_SIZE], amount: uint256, number_trades: u
         starting_time: _starting_time
     })
     log Deposited(_next_deposit, path[0], path[last_index], amount, number_trades, interval, _starting_time, msg.sender)
-    _next_deposit += 1
+    _next_deposit = unsafe_add(_next_deposit, 1)
     self.next_deposit = _next_deposit
 
 @internal
@@ -181,6 +182,7 @@ def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256
     else:
         self._safe_approve(_deposit.path[0], ROUTER, _amount)
         if _deposit.path[last_index] == VETH:
+            _path[last_index] = WETH
             _out_amount = self.balance
             UniswapV2Router(ROUTER).swapExactTokensForETHSupportingFeeOnTransferTokens(_amount, amount_out_min, _path, self, block.timestamp)
             _out_amount = self.balance - _out_amount
@@ -277,6 +279,7 @@ def update_service_fee_collector(new_service_fee_collector: address):
 @external
 def update_service_fee(new_service_fee: uint256):
     assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauthorized"
+    assert new_service_fee < DENOMINATOR
     old_service_fee: uint256 = self.service_fee
     self.service_fee = new_service_fee
     log UpdateServiceFee(old_service_fee, new_service_fee)
