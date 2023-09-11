@@ -1,4 +1,4 @@
-# DCA trading bot using pancakeswap
+# Time Weighted Average Price (TWAP) trading bot using pancakeswap
 
 ## User function
 
