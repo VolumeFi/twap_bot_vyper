@@ -6,6 +6,10 @@
 @author Volume.finance
 """
 
+struct SwapInfo:
+    path: DynArray[address, MAX_SIZE]
+    amount: uint256
+
 struct Deposit:
     depositor: address
     path: DynArray[address, MAX_SIZE]
@@ -30,7 +34,7 @@ ROUTER: immutable(address)
 MAX_SIZE: constant(uint256) = 8
 DENOMINATOR: constant(uint256) = 10000
 compass_evm: public(address)
-deposit_list: HashMap[uint256, Deposit]
+deposit_list: public(HashMap[uint256, Deposit])
 next_deposit: public(uint256)
 refund_wallet: public(address)
 fee: public(uint256)
@@ -109,39 +113,43 @@ def _safe_transfer_from(_token: address, _from: address, _to: address, _value: u
 @external
 @payable
 @nonreentrant('lock')
-def deposit(path: DynArray[address, MAX_SIZE], amount: uint256, number_trades: uint256, interval: uint256, starting_time: uint256):
+def deposit(swap_infos: DynArray[SwapInfo, MAX_SIZE], number_trades: uint256, interval: uint256, starting_time: uint256):
     _value: uint256 = msg.value
     _fee: uint256 = self.fee
     _fee = _fee * number_trades
     assert _value >= _fee, "Insufficient fee"
     send(self.refund_wallet, _fee)
     _value = unsafe_sub(_value, _fee)
-    last_index: uint256 = unsafe_sub(len(path), 1)
-    if path[0] == VETH:
-        assert _value >= amount, "Insufficient deposit"
-        if _value > amount:
-            send(msg.sender, unsafe_sub(_value, amount))
-    else:
-        if _value > 0:
-            send(msg.sender, _value)
-        self._safe_transfer_from(path[0], msg.sender, self, amount)
     _next_deposit: uint256 = self.next_deposit
-    _starting_time: uint256 = starting_time
-    if starting_time <= block.timestamp:
-        _starting_time = block.timestamp
-    assert number_trades > 0, "Wrong trade count"
-    self.deposit_list[_next_deposit] = Deposit({
-        depositor: msg.sender,
-        path: path,
-        input_amount: amount,
-        number_trades: number_trades,
-        interval: interval,
-        remaining_counts: number_trades,
-        starting_time: _starting_time
-    })
-    log Deposited(_next_deposit, path[0], path[last_index], amount, number_trades, interval, _starting_time, msg.sender)
-    _next_deposit = unsafe_add(_next_deposit, 1)
+    for swap_info in swap_infos:
+        last_index: uint256 = unsafe_sub(len(swap_info.path), 1)
+        amount: uint256 = 0
+        if swap_info.path[0] == VETH:
+            amount = swap_info.amount
+            assert _value >= amount, "Insufficient deposit"
+            _value = unsafe_sub(_value, amount)
+        else:
+            amount = ERC20(swap_info.path[0]).balanceOf(self)
+            self._safe_transfer_from(swap_info.path[0], msg.sender, self, swap_info.amount)
+            amount = ERC20(swap_info.path[0]).balanceOf(self) - amount
+        _starting_time: uint256 = starting_time
+        if starting_time <= block.timestamp:
+            _starting_time = block.timestamp
+        assert number_trades > 0, "Wrong trade count"
+        self.deposit_list[_next_deposit] = Deposit({
+            depositor: msg.sender,
+            path: swap_info.path,
+            input_amount: swap_info.amount,
+            number_trades: number_trades,
+            interval: interval,
+            remaining_counts: number_trades,
+            starting_time: _starting_time
+        })
+        log Deposited(_next_deposit, swap_info.path[0], swap_info.path[last_index], amount, number_trades, interval, _starting_time, msg.sender)
+        _next_deposit = unsafe_add(_next_deposit, 1)
     self.next_deposit = _next_deposit
+    if _value > 0:
+        send(msg.sender, _value)
 
 @internal
 def _safe_approve(_token: address, _to: address, _value: uint256):
