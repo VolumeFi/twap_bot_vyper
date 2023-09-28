@@ -116,10 +116,11 @@ def _safe_transfer_from(_token: address, _from: address, _to: address, _value: u
 def deposit(swap_infos: DynArray[SwapInfo, MAX_SIZE], number_trades: uint256, interval: uint256, starting_time: uint256):
     _value: uint256 = msg.value
     _fee: uint256 = self.fee
-    _fee = _fee * number_trades
-    assert _value >= _fee, "Insufficient fee"
-    send(self.refund_wallet, _fee)
-    _value = unsafe_sub(_value, _fee)
+    if _fee > 0:
+        _fee = _fee * number_trades
+        assert _value >= _fee, "Insufficient fee"
+        send(self.refund_wallet, _fee)
+        _value = unsafe_sub(_value, _fee)
     _next_deposit: uint256 = self.next_deposit
     for swap_info in swap_infos:
         last_index: uint256 = unsafe_sub(len(swap_info.path), 1)
@@ -198,15 +199,22 @@ def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256
             _out_amount = ERC20(_deposit.path[last_index]).balanceOf(self)
             UniswapV2Router(ROUTER).swapExactTokensForTokensSupportingFeeOnTransferTokens(_amount, amount_out_min, _path, self, block.timestamp)
             _out_amount = ERC20(_deposit.path[last_index]).balanceOf(self) - _out_amount
+    _service_fee: uint256 = self.service_fee
     service_fee_amount: uint256 = 0
+    if _service_fee > 0:
+        service_fee_amount = unsafe_div(_out_amount * _service_fee, DENOMINATOR)
     if _deposit.path[last_index] == VETH:
-        service_fee_amount = unsafe_div(_out_amount * self.service_fee, DENOMINATOR)
-        send(self.service_fee_collector, service_fee_amount)
-        send(_deposit.depositor, unsafe_sub(_out_amount, service_fee_amount))
+        if service_fee_amount > 0:
+            send(self.service_fee_collector, service_fee_amount)
+            send(_deposit.depositor, unsafe_sub(_out_amount, service_fee_amount))
+        else:
+            send(_deposit.depositor, _out_amount)
     else:
-        service_fee_amount = unsafe_div(_out_amount * self.service_fee, DENOMINATOR)
-        self._safe_transfer(_deposit.path[last_index], self.service_fee_collector, service_fee_amount)
-        self._safe_transfer(_deposit.path[last_index], _deposit.depositor, unsafe_sub(_out_amount, service_fee_amount))
+        if service_fee_amount > 0:
+            self._safe_transfer(_deposit.path[last_index], self.service_fee_collector, service_fee_amount)
+            self._safe_transfer(_deposit.path[last_index], _deposit.depositor, unsafe_sub(_out_amount, service_fee_amount))
+        else:
+            self._safe_transfer(_deposit.path[last_index], _deposit.depositor, _out_amount)
     log Swapped(deposit_id, _deposit.remaining_counts, _amount, _out_amount)
     return _out_amount
 
