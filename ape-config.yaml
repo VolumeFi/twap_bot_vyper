@@ -13,3 +13,16 @@ ethereum:
   default_network: mainnet-fork
   mainnet_fork:
     default_provider: foundry
+geth:
+  gnosis:
+    mainnet:
+      uri: https://rpc.gnosischain.com/
+  arbitrum:
+    mainnet:
+      uri: https://arb1.arbitrum.io/rpc/
+  base:
+    mainnet:
+      uri: https://mainnet.base.org/
+  optimism:
+    mainnet:
+      uri: https://mainnet.optimism.io/

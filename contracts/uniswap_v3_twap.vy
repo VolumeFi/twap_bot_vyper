@@ -1,4 +1,6 @@
-# @version 0.3.7
+# pragma version 0.3.10
+# pragma optimize gas
+# pragma evm-version paris
 
 """
 @title Uniswap V3 TWAP Bot
@@ -32,6 +34,9 @@ interface SwapRouter:
 
 interface ERC20:
     def balanceOf(_owner: address) -> uint256: view
+    def approve(_spender: address, _value: uint256) -> bool: nonpayable
+    def transfer(_to: address, _value: uint256) -> bool: nonpayable
+    def transferFrom(_from: address, _to: address, _value: uint256) -> bool: nonpayable
 
 interface Weth:
     def deposit(): payable
@@ -42,7 +47,7 @@ VETH: constant(address) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE # Virtual E
 WETH: immutable(address)
 ROUTER: immutable(address)
 MAX_SIZE: constant(uint256) = 8
-DENOMINATOR: constant(uint256) = 10000
+DENOMINATOR: constant(uint256) = 10 ** 18
 compass_evm: public(address)
 deposit_list: public(HashMap[uint256, Deposit])
 next_deposit: public(uint256)
@@ -61,6 +66,7 @@ event Deposited:
     interval: uint256
     starting_time: uint256
     depositor: address
+    is_stable_swap: bool
 
 event Swapped:
     deposit_id: uint256
@@ -113,16 +119,6 @@ def __init__(_compass_evm: address, router: address, _refund_wallet: address, _f
     log UpdateServiceFeeCollector(empty(address), _service_fee_collector)
     log UpdateServiceFee(0, _service_fee)
 
-@internal
-def _safe_transfer_from(_token: address, _from: address, _to: address, _value: uint256):
-    _response: Bytes[32] = raw_call(
-        _token,
-        _abi_encode(_from, _to, _value, method_id=method_id("transferFrom(address,address,uint256)")),
-        max_outsize=32
-    )  # dev: failed transferFrom
-    if len(_response) > 0:
-        assert convert(_response, bool), "failed transferFrom"  # dev: failed transferFrom
-
 @external
 @payable
 @nonreentrant('lock')
@@ -131,65 +127,57 @@ def deposit(swap_infos: DynArray[SwapInfo, MAX_SIZE], number_trades: uint256, in
     _fee: uint256 = self.fee
     if _fee > 0:
         _fee = _fee * number_trades
-        assert _value >= _fee, "Insufficient fee"
+        assert _value >= _fee, "Insuf fee"
         send(self.refund_wallet, _fee)
         _value = unsafe_sub(_value, _fee)
     _next_deposit: uint256 = self.next_deposit
     _starting_time: uint256 = starting_time
     if starting_time <= block.timestamp:
         _starting_time = block.timestamp
-    assert number_trades > 0, "Wrong trade count"
+    assert number_trades > 0, "Wrong count"
     for swap_info in swap_infos:
         amount: uint256 = 0
         assert len(swap_info.path) >= 43, "Path error"
         token0: address = convert(slice(swap_info.path, 0, 20), address)
+        fee_index: uint256 = 20
         if token0 == VETH:
             amount = swap_info.amount
-            assert _value >= amount, "Insufficient deposit"
+            assert _value >= amount, "Insuf deposit"
             _value = unsafe_sub(_value, amount)
+            fee_index = 40
         else:
             amount = ERC20(token0).balanceOf(self)
-            self._safe_transfer_from(token0, msg.sender, self, swap_info.amount)
+            assert ERC20(token0).transferFrom(msg.sender, self, swap_info.amount, default_return_value=True), "TF fail"
             amount = ERC20(token0).balanceOf(self) - amount
+        is_stable_swap: bool = True
+        for i in range(8):
+            if unsafe_add(fee_index, 3) >= len(swap_info.path):
+                break
+            fee_level: uint256 = convert(slice(swap_info.path, fee_index, 3), uint256)
+            if fee_level == 0:
+                break
+            if fee_level != 500:
+                is_stable_swap = False
+            fee_index = unsafe_add(fee_index, 23)
         self.deposit_list[_next_deposit] = Deposit({
             depositor: msg.sender,
             path: swap_info.path,
-            input_amount: swap_info.amount,
+            input_amount: amount,
             number_trades: number_trades,
             interval: interval,
             remaining_counts: number_trades,
             starting_time: _starting_time
         })
-        log Deposited(_next_deposit, token0, convert(slice(swap_info.path, unsafe_sub(len(swap_info.path), 20), 20), address), amount, number_trades, interval, _starting_time, msg.sender)
+        log Deposited(_next_deposit, token0, convert(slice(swap_info.path, unsafe_sub(len(swap_info.path), 20), 20), address), amount, number_trades, interval, _starting_time, msg.sender, is_stable_swap)
         _next_deposit = unsafe_add(_next_deposit, 1)
     self.next_deposit = _next_deposit
     if _value > 0:
         send(msg.sender, _value)
 
 @internal
-def _safe_approve(_token: address, _to: address, _value: uint256):
-    _response: Bytes[32] = raw_call(
-        _token,
-        _abi_encode(_to, _value, method_id=method_id("approve(address,uint256)")),
-        max_outsize=32
-    )  # dev: failed approve
-    if len(_response) > 0:
-        assert convert(_response, bool), "failed approve"  # dev: failed approve
-
-@internal
-def _safe_transfer(_token: address, _to: address, _value: uint256):
-    _response: Bytes[32] = raw_call(
-        _token,
-        _abi_encode(_to, _value, method_id=method_id("transfer(address,uint256)")),
-        max_outsize=32
-    )  # dev: failed transfer
-    if len(_response) > 0:
-        assert convert(_response, bool) # dev: failed transfer
-
-@internal
 def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256) -> uint256:
     _deposit: Deposit = self.deposit_list[deposit_id]
-    assert _deposit.remaining_counts > 0 and _deposit.remaining_counts == remaining_count, "wrong count"
+    assert _deposit.remaining_counts > 0 and _deposit.remaining_counts == remaining_count, "Wrong count"
     _amount: uint256 = _deposit.input_amount / _deposit.remaining_counts
     _deposit.input_amount -= _amount
     _deposit.remaining_counts -= 1
@@ -201,7 +189,7 @@ def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256
     if token0 == VETH:
         _path = slice(_path, 20, unsafe_sub(len(_path), 20))
         Weth(WETH).deposit(value=_amount)
-        self._safe_approve(WETH, ROUTER, _amount)
+        assert ERC20(WETH).approve(ROUTER, _amount), "Ap fail"
         _out_amount = ERC20(token1).balanceOf(self)
         SwapRouter(ROUTER).exactInput(ExactInputParams({
             path: _path,
@@ -212,7 +200,7 @@ def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256
         }))
         _out_amount = ERC20(token1).balanceOf(self) - _out_amount
     else:
-        self._safe_approve(token0, ROUTER, _amount)
+        assert ERC20(token0).approve(ROUTER, _amount), "Ap fail"
         if token1 == VETH:
             _path = slice(_path, 0, unsafe_sub(len(_path), 20))
             _out_amount = ERC20(WETH).balanceOf(self)
@@ -247,22 +235,21 @@ def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256
             send(_deposit.depositor, _out_amount)
     else:
         if service_fee_amount > 0:
-            self._safe_transfer(token1, self.service_fee_collector, service_fee_amount)
-            self._safe_transfer(token1, _deposit.depositor, unsafe_sub(_out_amount, service_fee_amount))
-        else:
-            self._safe_transfer(token1, _deposit.depositor, _out_amount)
+            assert ERC20(token1).transfer(self.service_fee_collector, service_fee_amount), "Tr fail"
+            _out_amount = unsafe_sub(_out_amount, service_fee_amount)
+        assert ERC20(token1).transfer(_deposit.depositor, _out_amount), "Tr fail"
     log Swapped(deposit_id, _deposit.remaining_counts, _amount, _out_amount)
     return _out_amount
 
 @external
 @nonreentrant('lock')
 def multiple_swap(deposit_id: DynArray[uint256, MAX_SIZE], remaining_counts: DynArray[uint256, MAX_SIZE], amount_out_min: DynArray[uint256, MAX_SIZE]):
-    assert msg.sender == self.compass_evm, "Unauthorized"
+    assert msg.sender == self.compass_evm, "Unauth"
     _len: uint256 = len(deposit_id)
     assert _len == len(amount_out_min) and _len == len(remaining_counts), "Validation error"
     _len = unsafe_add(unsafe_mul(unsafe_add(_len, 2), 96), 36)
-    assert len(msg.data) == _len, "invalid payload"
-    assert self.paloma == convert(slice(msg.data, unsafe_sub(_len, 32), 32), bytes32), "invalid paloma"
+    assert len(msg.data) == _len, "Invalid payload"
+    assert self.paloma == convert(slice(msg.data, unsafe_sub(_len, 32), 32), bytes32), "Invalid paloma"
     for i in range(MAX_SIZE):
         if i >= len(deposit_id):
             break
@@ -283,35 +270,51 @@ def multiple_swap_view(deposit_id: DynArray[uint256, MAX_SIZE], remaining_counts
 @nonreentrant('lock')
 def cancel(deposit_id: uint256):
     _deposit: Deposit = self.deposit_list[deposit_id]
-    assert _deposit.depositor == msg.sender, "Unauthorized"
-    assert _deposit.input_amount > 0, "all traded"
+    assert _deposit.depositor == msg.sender, "Unauth"
+    assert _deposit.input_amount > 0, "All traded"
     token0: address = convert(slice(_deposit.path, 0, 20), address)
     if token0 == VETH:
         send(msg.sender, _deposit.input_amount)
     else:
-        self._safe_transfer(token0, msg.sender, _deposit.input_amount)
+        assert ERC20(token0).transfer(msg.sender, _deposit.input_amount), "Tr fail"
     log Canceled(deposit_id, token0, convert(slice(_deposit.path, unsafe_sub(len(_deposit.path), 20), 20), address), _deposit.input_amount)
     _deposit.input_amount = 0
     _deposit.remaining_counts = 0
     self.deposit_list[deposit_id] = _deposit
 
+@external
+@nonreentrant('lock')
+def multiple_cancel(deposit_ids: DynArray[uint256, MAX_SIZE]):
+    for deposit_id in deposit_ids:
+        _deposit: Deposit = self.deposit_list[deposit_id]
+        assert _deposit.depositor == msg.sender, "Unauth"
+        assert _deposit.input_amount > 0, "All traded"
+        token0: address = convert(slice(_deposit.path, 0, 20), address)
+        if token0 == VETH:
+            send(msg.sender, _deposit.input_amount)
+        else:
+            assert ERC20(token0).transfer(msg.sender, _deposit.input_amount), "Tr fail"
+        log Canceled(deposit_id, token0, convert(slice(_deposit.path, unsafe_sub(len(_deposit.path), 20), 20), address), _deposit.input_amount)
+        _deposit.input_amount = 0
+        _deposit.remaining_counts = 0
+        self.deposit_list[deposit_id] = _deposit
 
 @external
 def update_compass(new_compass: address):
-    assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauthorized"
+    assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauth"
     self.compass_evm = new_compass
     log UpdateCompass(msg.sender, new_compass)
 
 @external
 def update_refund_wallet(new_refund_wallet: address):
-    assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauthorized"
+    assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauth"
     old_refund_wallet: address = self.refund_wallet
     self.refund_wallet = new_refund_wallet
     log UpdateRefundWallet(old_refund_wallet, new_refund_wallet)
 
 @external
 def update_fee(new_fee: uint256):
-    assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauthorized"
+    assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauth"
     old_fee: uint256 = self.fee
     self.fee = new_fee
     log UpdateFee(old_fee, new_fee)
@@ -325,14 +328,14 @@ def set_paloma():
 
 @external
 def update_service_fee_collector(new_service_fee_collector: address):
-    assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauthorized"
+    assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauth"
     old_service_fee_collector: address = self.service_fee_collector
     self.service_fee_collector = new_service_fee_collector
     log UpdateServiceFeeCollector(old_service_fee_collector, new_service_fee_collector)
 
 @external
 def update_service_fee(new_service_fee: uint256):
-    assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauthorized"
+    assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauth"
     assert new_service_fee < DENOMINATOR
     old_service_fee: uint256 = self.service_fee
     self.service_fee = new_service_fee
