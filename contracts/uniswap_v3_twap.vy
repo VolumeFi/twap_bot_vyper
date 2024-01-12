@@ -156,7 +156,7 @@ def deposit(swap_infos: DynArray[SwapInfo, MAX_SIZE], number_trades: uint256, in
             fee_level: uint256 = convert(slice(swap_info.path, fee_index, 3), uint256)
             if fee_level == 0:
                 break
-            if fee_level != 500:
+            if fee_level > 500:
                 is_stable_swap = False
             fee_index = unsafe_add(fee_index, 23)
         self.deposit_list[_next_deposit] = Deposit({
