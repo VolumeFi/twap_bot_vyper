@@ -236,8 +236,9 @@ def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256
     else:
         if service_fee_amount > 0:
             assert ERC20(token1).transfer(self.service_fee_collector, service_fee_amount), "Tr fail"
-            _out_amount = unsafe_sub(_out_amount, service_fee_amount)
-        assert ERC20(token1).transfer(_deposit.depositor, _out_amount), "Tr fail"
+            assert ERC20(token1).transfer(_deposit.depositor, unsafe_sub(_out_amount, service_fee_amount)), "Tr fail"
+        else:
+            assert ERC20(token1).transfer(_deposit.depositor, _out_amount), "Tr fail"
     log Swapped(deposit_id, _deposit.remaining_counts, _amount, _out_amount)
     return _out_amount
 
