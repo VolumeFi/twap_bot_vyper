@@ -1,4 +1,6 @@
-# @version 0.3.7
+# pragma version 0.3.10
+# pragma optimize gas
+# pragma evm-version paris
 
 """
 @title Uniswap V2 TWAP Bot
@@ -27,13 +29,16 @@ interface UniswapV2Router:
 
 interface ERC20:
     def balanceOf(_owner: address) -> uint256: view
+    def approve(_spender: address, _value: uint256) -> bool: nonpayable
+    def transfer(_to: address, _value: uint256) -> bool: nonpayable
+    def transferFrom(_from: address, _to: address, _value: uint256) -> bool: nonpayable
 
 VETH: constant(address) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE # Virtual ETH
 WETH: immutable(address)
 ROUTER: immutable(address)
 MAX_SIZE: constant(uint256) = 8
 DENOMINATOR: constant(uint256) = 10000
-compass_evm: public(address)
+compass: public(address)
 deposit_list: public(HashMap[uint256, Deposit])
 next_deposit: public(uint256)
 refund_wallet: public(address)
@@ -85,8 +90,8 @@ event UpdateServiceFee:
     new_service_fee: uint256
 
 @external
-def __init__(_compass_evm: address, router: address, _refund_wallet: address, _fee: uint256, _service_fee_collector: address, _service_fee: uint256):
-    self.compass_evm = _compass_evm
+def __init__(_compass: address, router: address, _refund_wallet: address, _fee: uint256, _service_fee_collector: address, _service_fee: uint256):
+    self.compass = _compass
     ROUTER = router
     WETH = UniswapV2Router(ROUTER).WETH()
     self.refund_wallet = _refund_wallet
@@ -94,21 +99,11 @@ def __init__(_compass_evm: address, router: address, _refund_wallet: address, _f
     self.service_fee_collector = _service_fee_collector
     assert _service_fee < DENOMINATOR
     self.service_fee = _service_fee
-    log UpdateCompass(empty(address), _compass_evm)
+    log UpdateCompass(empty(address), _compass)
     log UpdateRefundWallet(empty(address), _refund_wallet)
     log UpdateFee(0, _fee)
     log UpdateServiceFeeCollector(empty(address), _service_fee_collector)
     log UpdateServiceFee(0, _service_fee)
-
-@internal
-def _safe_transfer_from(_token: address, _from: address, _to: address, _value: uint256):
-    _response: Bytes[32] = raw_call(
-        _token,
-        _abi_encode(_from, _to, _value, method_id=method_id("transferFrom(address,address,uint256)")),
-        max_outsize=32
-    )  # dev: failed transferFrom
-    if len(_response) > 0:
-        assert convert(_response, bool), "failed transferFrom"  # dev: failed transferFrom
 
 @external
 @payable
@@ -131,7 +126,7 @@ def deposit(swap_infos: DynArray[SwapInfo, MAX_SIZE], number_trades: uint256, in
             _value = unsafe_sub(_value, amount)
         else:
             amount = ERC20(swap_info.path[0]).balanceOf(self)
-            self._safe_transfer_from(swap_info.path[0], msg.sender, self, swap_info.amount)
+            assert ERC20(swap_info.path[0]).transferFrom(msg.sender, self, swap_info.amount, default_return_value=True), "Failed transferFrom"
             amount = ERC20(swap_info.path[0]).balanceOf(self) - amount
         _starting_time: uint256 = starting_time
         if starting_time <= block.timestamp:
@@ -153,24 +148,8 @@ def deposit(swap_infos: DynArray[SwapInfo, MAX_SIZE], number_trades: uint256, in
         send(msg.sender, _value)
 
 @internal
-def _safe_approve(_token: address, _to: address, _value: uint256):
-    _response: Bytes[32] = raw_call(
-        _token,
-        _abi_encode(_to, _value, method_id=method_id("approve(address,uint256)")),
-        max_outsize=32
-    )  # dev: failed approve
-    if len(_response) > 0:
-        assert convert(_response, bool), "failed approve"  # dev: failed approve
-
-@internal
 def _safe_transfer(_token: address, _to: address, _value: uint256):
-    _response: Bytes[32] = raw_call(
-        _token,
-        _abi_encode(_to, _value, method_id=method_id("transfer(address,uint256)")),
-        max_outsize=32
-    )  # dev: failed transfer
-    if len(_response) > 0:
-        assert convert(_response, bool) # dev: failed transfer
+    assert ERC20(_token).transfer(_to, _value, default_return_value=True), "Failed transfer"
 
 @internal
 def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256) -> uint256:
@@ -189,7 +168,7 @@ def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256
         UniswapV2Router(ROUTER).swapExactETHForTokensSupportingFeeOnTransferTokens(amount_out_min, _path, self, block.timestamp, value=_amount)
         _out_amount = ERC20(_deposit.path[last_index]).balanceOf(self) - _out_amount
     else:
-        self._safe_approve(_deposit.path[0], ROUTER, _amount)
+        assert ERC20(_deposit.path[0]).approve(ROUTER, _amount, default_return_value=True), "Failed approve"
         if _deposit.path[last_index] == VETH:
             _path[last_index] = WETH
             _out_amount = self.balance
@@ -218,15 +197,17 @@ def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256
     log Swapped(deposit_id, _deposit.remaining_counts, _amount, _out_amount)
     return _out_amount
 
+@internal
+def _paloma_check():
+    assert msg.sender == self.compass, "Not compass"
+    assert self.paloma == convert(slice(msg.data, unsafe_sub(len(msg.data), 32), 32), bytes32), "Invalid paloma"
+
 @external
 @nonreentrant('lock')
 def multiple_swap(deposit_id: DynArray[uint256, MAX_SIZE], remaining_counts: DynArray[uint256, MAX_SIZE], amount_out_min: DynArray[uint256, MAX_SIZE]):
-    assert msg.sender == self.compass_evm, "Unauthorized"
+    self._paloma_check()
     _len: uint256 = len(deposit_id)
     assert _len == len(amount_out_min) and _len == len(remaining_counts), "Validation error"
-    _len = unsafe_add(unsafe_mul(unsafe_add(_len, 2), 96), 36)
-    assert len(msg.data) == _len, "invalid payload"
-    assert self.paloma == convert(slice(msg.data, unsafe_sub(_len, 32), 32), bytes32), "invalid paloma"
     for i in range(MAX_SIZE):
         if i >= len(deposit_id):
             break
@@ -260,41 +241,41 @@ def cancel(deposit_id: uint256):
 
 @external
 def update_compass(new_compass: address):
-    assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauthorized"
-    self.compass_evm = new_compass
+    self._paloma_check()
+    self.compass = new_compass
     log UpdateCompass(msg.sender, new_compass)
 
 @external
 def update_refund_wallet(new_refund_wallet: address):
-    assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauthorized"
+    self._paloma_check()
     old_refund_wallet: address = self.refund_wallet
     self.refund_wallet = new_refund_wallet
     log UpdateRefundWallet(old_refund_wallet, new_refund_wallet)
 
 @external
 def update_fee(new_fee: uint256):
-    assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauthorized"
+    self._paloma_check()
     old_fee: uint256 = self.fee
     self.fee = new_fee
     log UpdateFee(old_fee, new_fee)
 
 @external
 def set_paloma():
-    assert msg.sender == self.compass_evm and self.paloma == empty(bytes32) and len(msg.data) == 36, "Invalid"
+    assert msg.sender == self.compass and self.paloma == empty(bytes32) and len(msg.data) == 36, "Invalid"
     _paloma: bytes32 = convert(slice(msg.data, 4, 32), bytes32)
     self.paloma = _paloma
     log SetPaloma(_paloma)
 
 @external
 def update_service_fee_collector(new_service_fee_collector: address):
-    assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauthorized"
+    self._paloma_check()
     old_service_fee_collector: address = self.service_fee_collector
     self.service_fee_collector = new_service_fee_collector
     log UpdateServiceFeeCollector(old_service_fee_collector, new_service_fee_collector)
 
 @external
 def update_service_fee(new_service_fee: uint256):
-    assert msg.sender == self.compass_evm and len(msg.data) == 68 and convert(slice(msg.data, 36, 32), bytes32) == self.paloma, "Unauthorized"
+    self._paloma_check()
     assert new_service_fee < DENOMINATOR
     old_service_fee: uint256 = self.service_fee
     self.service_fee = new_service_fee
