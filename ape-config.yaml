@@ -1,4 +1,8 @@
-name: DCA trading bot
+name: twap-bot-vyper
+plugins:
+  - name: vyper
+  - name: infura
+  - name: foundry
 foundry:
   fork:
     ethereum:

@@ -25,15 +25,3 @@ The bot script will run this swap function with swap ID and amount_out_min (for 
 | swap_id       | uint256 | Swap ID that is going to trade                   |
 | amout_out_min | uint256 | minimum token amount to receive in current trade |
 
-### triggerable_deposit
-
-This view function is to get which swap ID is reached to trade time and the expected amount of the trade. This will be used to run swap function.
-
-Returning data
-
-| type    | description                                  |
-| ------- | -------------------------------------------- |
-| uint256 | swap id reached interval                     |
-| uint256 | minimum token amount to receive in the trade |
-| uint256 | remaining number of trade                    |
-

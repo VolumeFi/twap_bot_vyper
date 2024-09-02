@@ -1,6 +1,6 @@
-# pragma version 0.3.10
+# pragma version 0.4.0
 # pragma optimize gas
-# pragma evm-version paris
+# pragma evm-version cancun
 
 """
 @title Uniswap V2 TWAP Bot
@@ -89,11 +89,11 @@ event UpdateServiceFee:
     old_service_fee: uint256
     new_service_fee: uint256
 
-@external
+@deploy
 def __init__(_compass: address, router: address, _refund_wallet: address, _fee: uint256, _service_fee_collector: address, _service_fee: uint256):
     self.compass = _compass
     ROUTER = router
-    WETH = UniswapV2Router(ROUTER).WETH()
+    WETH = staticcall UniswapV2Router(ROUTER).WETH()
     self.refund_wallet = _refund_wallet
     self.fee = _fee
     self.service_fee_collector = _service_fee_collector
@@ -107,7 +107,7 @@ def __init__(_compass: address, router: address, _refund_wallet: address, _fee: 
 
 @external
 @payable
-@nonreentrant('lock')
+@nonreentrant
 def deposit(swap_infos: DynArray[SwapInfo, MAX_SIZE], number_trades: uint256, interval: uint256, starting_time: uint256):
     _value: uint256 = msg.value
     _fee: uint256 = self.fee
@@ -117,7 +117,7 @@ def deposit(swap_infos: DynArray[SwapInfo, MAX_SIZE], number_trades: uint256, in
         send(self.refund_wallet, _fee)
         _value = unsafe_sub(_value, _fee)
     _next_deposit: uint256 = self.next_deposit
-    for swap_info in swap_infos:
+    for swap_info: SwapInfo in swap_infos:
         last_index: uint256 = unsafe_sub(len(swap_info.path), 1)
         amount: uint256 = 0
         if swap_info.path[0] == VETH:
@@ -125,22 +125,22 @@ def deposit(swap_infos: DynArray[SwapInfo, MAX_SIZE], number_trades: uint256, in
             assert _value >= amount, "Insufficient deposit"
             _value = unsafe_sub(_value, amount)
         else:
-            amount = ERC20(swap_info.path[0]).balanceOf(self)
-            assert ERC20(swap_info.path[0]).transferFrom(msg.sender, self, swap_info.amount, default_return_value=True), "Failed transferFrom"
-            amount = ERC20(swap_info.path[0]).balanceOf(self) - amount
+            amount = staticcall ERC20(swap_info.path[0]).balanceOf(self)
+            assert extcall ERC20(swap_info.path[0]).transferFrom(msg.sender, self, swap_info.amount, default_return_value=True), "Failed transferFrom"
+            amount = staticcall ERC20(swap_info.path[0]).balanceOf(self) - amount
         _starting_time: uint256 = starting_time
         if starting_time <= block.timestamp:
             _starting_time = block.timestamp
         assert number_trades > 0, "Wrong trade count"
-        self.deposit_list[_next_deposit] = Deposit({
-            depositor: msg.sender,
-            path: swap_info.path,
-            input_amount: swap_info.amount,
-            number_trades: number_trades,
-            interval: interval,
-            remaining_counts: number_trades,
-            starting_time: _starting_time
-        })
+        self.deposit_list[_next_deposit] = Deposit(
+            depositor = msg.sender,
+            path = swap_info.path,
+            input_amount = swap_info.amount,
+            number_trades = number_trades,
+            interval = interval,
+            remaining_counts = number_trades,
+            starting_time = _starting_time
+        )
         log Deposited(_next_deposit, swap_info.path[0], swap_info.path[last_index], amount, number_trades, interval, _starting_time, msg.sender)
         _next_deposit = unsafe_add(_next_deposit, 1)
     self.next_deposit = _next_deposit
@@ -149,13 +149,13 @@ def deposit(swap_infos: DynArray[SwapInfo, MAX_SIZE], number_trades: uint256, in
 
 @internal
 def _safe_transfer(_token: address, _to: address, _value: uint256):
-    assert ERC20(_token).transfer(_to, _value, default_return_value=True), "Failed transfer"
+    assert extcall ERC20(_token).transfer(_to, _value, default_return_value=True), "Failed transfer"
 
 @internal
 def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256) -> uint256:
     _deposit: Deposit = self.deposit_list[deposit_id]
     assert _deposit.remaining_counts > 0 and _deposit.remaining_counts == remaining_count, "wrong count"
-    _amount: uint256 = _deposit.input_amount / _deposit.remaining_counts
+    _amount: uint256 = _deposit.input_amount // _deposit.remaining_counts
     _deposit.input_amount -= _amount
     _deposit.remaining_counts -= 1
     self.deposit_list[deposit_id] = _deposit
@@ -164,20 +164,20 @@ def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256
     last_index: uint256 = unsafe_sub(len(_deposit.path), 1)
     if _deposit.path[0] == VETH:
         _path[0] = WETH
-        _out_amount = ERC20(_deposit.path[last_index]).balanceOf(self)
-        UniswapV2Router(ROUTER).swapExactETHForTokensSupportingFeeOnTransferTokens(amount_out_min, _path, self, block.timestamp, value=_amount)
-        _out_amount = ERC20(_deposit.path[last_index]).balanceOf(self) - _out_amount
+        _out_amount = staticcall ERC20(_deposit.path[last_index]).balanceOf(self)
+        extcall UniswapV2Router(ROUTER).swapExactETHForTokensSupportingFeeOnTransferTokens(amount_out_min, _path, self, block.timestamp, value=_amount)
+        _out_amount = staticcall ERC20(_deposit.path[last_index]).balanceOf(self) - _out_amount
     else:
-        assert ERC20(_deposit.path[0]).approve(ROUTER, _amount, default_return_value=True), "Failed approve"
+        assert extcall ERC20(_deposit.path[0]).approve(ROUTER, _amount, default_return_value=True), "Failed approve"
         if _deposit.path[last_index] == VETH:
             _path[last_index] = WETH
             _out_amount = self.balance
-            UniswapV2Router(ROUTER).swapExactTokensForETHSupportingFeeOnTransferTokens(_amount, amount_out_min, _path, self, block.timestamp)
+            extcall UniswapV2Router(ROUTER).swapExactTokensForETHSupportingFeeOnTransferTokens(_amount, amount_out_min, _path, self, block.timestamp)
             _out_amount = self.balance - _out_amount
         else:
-            _out_amount = ERC20(_deposit.path[last_index]).balanceOf(self)
-            UniswapV2Router(ROUTER).swapExactTokensForTokensSupportingFeeOnTransferTokens(_amount, amount_out_min, _path, self, block.timestamp)
-            _out_amount = ERC20(_deposit.path[last_index]).balanceOf(self) - _out_amount
+            _out_amount = staticcall ERC20(_deposit.path[last_index]).balanceOf(self)
+            extcall UniswapV2Router(ROUTER).swapExactTokensForTokensSupportingFeeOnTransferTokens(_amount, amount_out_min, _path, self, block.timestamp)
+            _out_amount = staticcall ERC20(_deposit.path[last_index]).balanceOf(self) - _out_amount
     _service_fee: uint256 = self.service_fee
     service_fee_amount: uint256 = 0
     if _service_fee > 0:
@@ -203,12 +203,12 @@ def _paloma_check():
     assert self.paloma == convert(slice(msg.data, unsafe_sub(len(msg.data), 32), 32), bytes32), "Invalid paloma"
 
 @external
-@nonreentrant('lock')
+@nonreentrant
 def multiple_swap(deposit_id: DynArray[uint256, MAX_SIZE], remaining_counts: DynArray[uint256, MAX_SIZE], amount_out_min: DynArray[uint256, MAX_SIZE]):
     self._paloma_check()
     _len: uint256 = len(deposit_id)
     assert _len == len(amount_out_min) and _len == len(remaining_counts), "Validation error"
-    for i in range(MAX_SIZE):
+    for i: uint256 in range(MAX_SIZE):
         if i >= len(deposit_id):
             break
         self._swap(deposit_id[i], remaining_counts[i], amount_out_min[i])
@@ -218,14 +218,14 @@ def multiple_swap_view(deposit_id: DynArray[uint256, MAX_SIZE], remaining_counts
     assert msg.sender == empty(address) # only for view function
     _len: uint256 = len(deposit_id)
     res: DynArray[uint256, MAX_SIZE] = []
-    for i in range(MAX_SIZE):
+    for i: uint256 in range(MAX_SIZE):
         if i >= len(deposit_id):
             break
         res.append(self._swap(deposit_id[i], remaining_counts[i], 1))
     return res
 
 @external
-@nonreentrant('lock')
+@nonreentrant
 def cancel(deposit_id: uint256):
     _deposit: Deposit = self.deposit_list[deposit_id]
     assert _deposit.depositor == msg.sender, "Unauthorized"
