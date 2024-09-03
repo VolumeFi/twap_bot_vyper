@@ -15,7 +15,6 @@ struct SwapInfo:
 struct ExactInputParams:
     path: Bytes[224]
     recipient: address
-    deadline: uint256
     amountIn: uint256
     amountOutMinimum: uint256
 
@@ -197,7 +196,6 @@ def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256
         extcall SwapRouter(ROUTER).exactInput(ExactInputParams(
             path = _path,
             recipient = self,
-            deadline = block.timestamp,
             amountIn = _amount,
             amountOutMinimum = amount_out_min
         ))
@@ -210,7 +208,6 @@ def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256
             extcall SwapRouter(ROUTER).exactInput(ExactInputParams(
                 path = _path,
                 recipient = self,
-                deadline = block.timestamp,
                 amountIn = _amount,
                 amountOutMinimum = amount_out_min
             ))
@@ -221,7 +218,6 @@ def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256
             extcall SwapRouter(ROUTER).exactInput(ExactInputParams(
                 path = _path,
                 recipient = self,
-                deadline = block.timestamp,
                 amountIn = _amount,
                 amountOutMinimum = amount_out_min
             ))
