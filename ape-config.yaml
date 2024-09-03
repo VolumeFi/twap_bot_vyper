@@ -3,6 +3,11 @@ plugins:
   - name: vyper
   - name: infura
   - name: foundry
+
+vyper:
+  compiler_version: 0.4.0
+  evm_version: cancun
+
 foundry:
   fork:
     ethereum:

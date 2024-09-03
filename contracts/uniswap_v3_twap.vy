@@ -166,7 +166,8 @@ def deposit(swap_infos: DynArray[SwapInfo, MAX_SIZE], number_trades: uint256, in
             remaining_counts = number_trades,
             starting_time = _starting_time
         )
-        log Deposited(_next_deposit, token0, convert(slice(swap_info.path, unsafe_sub(len(swap_info.path), 20), 20), address), amount, number_trades, interval, _starting_time, msg.sender, is_stable_swap)
+        _pos: uint256 = unsafe_sub(len(swap_info.path), 20)
+        log Deposited(_next_deposit, token0, convert(slice(swap_info.path, _pos, 20), address), amount, number_trades, interval, _starting_time, msg.sender, is_stable_swap)
         _next_deposit = unsafe_add(_next_deposit, 1)
     self.next_deposit = _next_deposit
     if _value > 0:
@@ -187,9 +188,11 @@ def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256
     _out_amount: uint256 = 0
     _path: Bytes[224] = _deposit.path
     token0: address = convert(slice(_path, 0, 20), address)
-    token1: address = convert(slice(_path, unsafe_sub(len(_path), 20), 20), address)
+    _pos: uint256 = unsafe_sub(len(_path), 20)
+    token1: address = convert(slice(_path, _pos, 20), address)
     if token0 == VETH:
-        _path = slice(_path, 20, unsafe_sub(len(_path), 20))
+        _len: uint256 = unsafe_sub(len(_path), 20)
+        _path = slice(_path, 20, _len)
         extcall Weth(WETH).deposit(value=_amount)
         extcall ERC20(WETH).approve(ROUTER, _amount)
         _out_amount = staticcall ERC20(token1).balanceOf(self)
@@ -203,7 +206,8 @@ def _swap(deposit_id: uint256, remaining_count: uint256, amount_out_min: uint256
     else:
         assert extcall ERC20(token0).approve(ROUTER, _amount), "Failed approve"
         if token1 == VETH:
-            _path = slice(_path, 0, unsafe_sub(len(_path), 20))
+            _len: uint256 = unsafe_sub(len(_path), 20)
+            _path = slice(_path, 0, _len)
             _out_amount = staticcall ERC20(WETH).balanceOf(self)
             extcall SwapRouter(ROUTER).exactInput(ExactInputParams(
                 path = _path,
@@ -279,7 +283,8 @@ def cancel(deposit_id: uint256):
         send(msg.sender, _deposit.input_amount)
     else:
         self._safe_transfer(token0, msg.sender, _deposit.input_amount)
-    log Canceled(deposit_id, token0, convert(slice(_deposit.path, unsafe_sub(len(_deposit.path), 20), 20), address), _deposit.input_amount)
+    _pos: uint256 = unsafe_sub(len(_deposit.path), 20)
+    log Canceled(deposit_id, token0, convert(slice(_deposit.path, _pos, 20), address), _deposit.input_amount)
     _deposit.input_amount = 0
     _deposit.remaining_counts = 0
     self.deposit_list[deposit_id] = _deposit
